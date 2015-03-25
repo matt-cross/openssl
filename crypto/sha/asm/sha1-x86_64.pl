@@ -82,6 +82,10 @@ $avx=1 if (!$avx && $win64 && ($flavour =~ /masm/ || $ENV{ASM} =~ /ml64/) &&
 	   `ml64 2>&1` =~ /Version ([0-9]+)\./ &&
 	   $1>=10);
 
+$cfi=1 if (`$ENV{CC} -Wa,-v -c -o /dev/null -x assembler /dev/null 2>&1`
+		=~ /GNU assembler version ([2-9]\.[0-9]+)/ &&
+	   $1>=2.19);
+
 open OUT,"| \"$^X\" $xlate $flavour $output";
 *STDOUT=*OUT;
 
@@ -221,6 +225,8 @@ $code.=<<___;
 .type	sha1_block_data_order,\@function,3
 .align	16
 sha1_block_data_order:
+`".cfi_startproc" if $cfi`
+
 	mov	OPENSSL_ia32cap_P+0(%rip),%r9d
 	mov	OPENSSL_ia32cap_P+4(%rip),%r8d
 	test	\$`1<<9`,%r8d		# check SSSE3 bit
@@ -239,16 +245,37 @@ $code.=<<___;
 .align	16
 .Lialu:
 	push	%rbx
+# The CFA (Cononical Frame Address) is after the pushed return value, so RBX was just stored at CFA - 16:
+`".cfi_offset rbx,-16" if $cfi`
+`".cfi_adjust_cfa_offset 8" if $cfi`
 	push	%rbp
+`".cfi_offset rbp,-24" if $cfi`
+`".cfi_adjust_cfa_offset 8" if $cfi`
 	push	%r12
+`".cfi_offset r12,-32" if $cfi`
+`".cfi_adjust_cfa_offset 8" if $cfi`
 	push	%r13
+`".cfi_offset r13,-40" if $cfi`
+`".cfi_adjust_cfa_offset 8" if $cfi`
 	mov	%rsp,%r11
+`".cfi_def_cfa_register r11" if $cfi`
 	mov	%rdi,$ctx	# reassigned argument
 	sub	\$`8+16*4`,%rsp
 	mov	%rsi,$inp	# reassigned argument
 	and	\$-64,%rsp
 	mov	%rdx,$num	# reassigned argument
 	mov	%r11,`16*4`(%rsp)
+# This adds a "CFA expression" to say that the CFA is calculated by reading the value at RSP+0x40, and adding 40 to it:
+# DW_CFA_def_cfa_expression    0x0f           : says CFA is calculated by evaluating the following expression
+# BLOCK
+#   length (ULEB128)           0x06           : number of bytes remaining
+#   DW_OP_breg7 0x40           0x77 0xc0 0x00 : read RSP, add 0x40, and push onto stack - note SLEB128 encoding of 0x40
+#                                               requires 2 bytes to avoid sign extension
+#   DW_OP_deref                0x06           : read from addr on top of stack
+#   DW_OP_plus_uconst 0x28     0x23 0x28      : pop top of stack, add 40 (0x28), push back onto stack
+
+`".cfi_escape 0x0f,0x06,0x77,0xc0,0x00,0x06,0x23,0x28" if $cfi`
+
 .Lprologue:
 
 	mov	0($ctx),$A
@@ -282,13 +309,20 @@ $code.=<<___;
 	jnz	.Lloop
 
 	mov	`16*4`(%rsp),%rsi
+`".cfi_def_cfa rsi,40" if $cfi`
 	mov	(%rsi),%r13
+`".cfi_restore r13" if $cfi`
 	mov	8(%rsi),%r12
+`".cfi_restore r12" if $cfi`
 	mov	16(%rsi),%rbp
+`".cfi_restore rbp" if $cfi`
 	mov	24(%rsi),%rbx
+`".cfi_restore rbx" if $cfi`
 	lea	32(%rsi),%rsp
+`".cfi_def_cfa rsp,8" if $cfi`
 .Lepilogue:
 	ret
+`".cfi_endproc" if $cfi`
 .size	sha1_block_data_order,.-sha1_block_data_order
 ___
 {{{
@@ -308,10 +342,18 @@ $code.=<<___;
 .align	16
 sha1_block_data_order_ssse3:
 _ssse3_shortcut:
+`".cfi_startproc" if $cfi`
 	push	%rbx
+`".cfi_offset rbx,-16" if $cfi`
+`".cfi_adjust_cfa_offset 8" if $cfi`
 	push	%rbp
+`".cfi_offset rbp,-24" if $cfi`
+`".cfi_adjust_cfa_offset 8" if $cfi`
 	push	%r12
+`".cfi_offset r12,-32" if $cfi`
+`".cfi_adjust_cfa_offset 8" if $cfi`
 	lea	`-64-($win64?5*16:0)`(%rsp),%rsp
+`sprintf ".cfi_adjust_cfa_offset %d", 64+($win64?5*16:0) if $cfi`
 ___
 $code.=<<___ if ($win64);
 	movaps	%xmm6,64+0(%rsp)
@@ -703,11 +745,16 @@ ___
 $code.=<<___;
 	lea	`64+($win64?5*16:0)`(%rsp),%rsi
 	mov	0(%rsi),%r12
+`".cfi_restore r12" if $cfi`
 	mov	8(%rsi),%rbp
+`".cfi_restore rbp" if $cfi`
 	mov	16(%rsi),%rbx
+`".cfi_restore rbx" if $cfi`
 	lea	24(%rsi),%rsp
+`".cfi_def_cfa rsp,8" if $cfi`
 .Lepilogue_ssse3:
 	ret
+`".cfi_endproc" if $cfi`
 .size	sha1_block_data_order_ssse3,.-sha1_block_data_order_ssse3
 ___
 
@@ -728,10 +775,18 @@ $code.=<<___;
 .align	16
 sha1_block_data_order_avx:
 _avx_shortcut:
+`".cfi_startproc" if $cfi`
 	push	%rbx
+`".cfi_offset rbx,-16" if $cfi`
+`".cfi_adjust_cfa_offset 8" if $cfi`
 	push	%rbp
+`".cfi_offset rbp,-24" if $cfi`
+`".cfi_adjust_cfa_offset 8" if $cfi`
 	push	%r12
+`".cfi_offset r12,-32" if $cfi`
+`".cfi_adjust_cfa_offset 8" if $cfi`
 	lea	`-64-($win64?5*16:0)`(%rsp),%rsp
+`sprintf ".cfi_adjust_cfa_offset %d", 64+($win64?5*16:0) if $cfi`
 ___
 $code.=<<___ if ($win64);
 	movaps	%xmm6,64+0(%rsp)
@@ -1061,11 +1116,16 @@ ___
 $code.=<<___;
 	lea	`64+($win64?5*16:0)`(%rsp),%rsi
 	mov	0(%rsi),%r12
+`".cfi_restore r12" if $cfi`
 	mov	8(%rsi),%rbp
+`".cfi_restore rbp" if $cfi`
 	mov	16(%rsi),%rbx
+`".cfi_restore rbx" if $cfi`
 	lea	24(%rsi),%rsp
+`".cfi_def_cfa rsp,8" if $cfi`
 .Lepilogue_avx:
 	ret
+`".cfi_endproc" if $cfi`
 .size	sha1_block_data_order_avx,.-sha1_block_data_order_avx
 ___
 }
